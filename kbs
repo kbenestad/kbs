@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+#
+# Copyright 2026 Kristian Benestad
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""kbs - simple filename/content search tool.
+
+Usage:
+  kbs SEARCHTERM               search filenames, recursively, current dir down
+  kbs "term1 | term2"          OR-match multiple terms (quote the whole thing)
+  kbs "search*"                wildcard match (quote it, or bash will expand it)
+  kbs SEARCHTERM -c            search file contents instead of filenames
+  kbs SEARCHTERM -r            filenames in current folder only, not recursive
+  kbs SEARCHTERM -p TYPE       restrict to a file type (see TYPES below)
+  kbs SEARCHTERM -t            show results as a tree instead of a flat list
+  kbs SEARCHTERM -c -s [N]     show N words of context around each match (default 8)
+
+Flags combine, e.g.: kbs "invoice*" -c -p office -s 10
+"""
+
+import argparse
+import fnmatch
+import os
+import re
+import sys
+
+# File-type groups for the -p/--type flag.
+# To add a new type: add a "name: {extensions}" entry below.
+# The name becomes the value you pass, e.g. TYPES['pdf'] -> `kbs term -p pdf`.
+TYPES = {
+    'office': {'.doc', '.docx', '.odt', '.rtf', '.md', '.markdown',
+               '.pdf', '.txt', '.csv'},
+    'html': {'.html', '.htm'},
+    'dev': {'.py', '.js', '.jsx', '.ts', '.tsx', '.sh', '.bash', '.c', '.h',
+            '.cpp', '.hpp', '.java', '.go', '.rs', '.php', '.rb', '.json',
+            '.yaml', '.yml', '.css', '.sql'},
+}
+
+
+def build_pattern(search_term):
+    """Turn 'term1 | term2*' into a list of terms and one combined regex."""
+    terms = [t.strip() for t in search_term.split('|') if t.strip()]
+    if not terms:
+        sys.exit('kbs: empty search term')
+    parts = []
+    for t in terms:
+        translated = fnmatch.translate(t)
+        translated = re.sub(r'\\Z$', '', translated)  # unanchor the end
+        parts.append(f'(?:{translated})')
+    combined = '|'.join(parts)
+    return terms, re.compile(combined, re.IGNORECASE)
+
+
+def iter_files(root, recursive):
+    if recursive:
+        for dirpath, _, filenames in os.walk(root):
+            for name in filenames:
+                yield os.path.join(dirpath, name)
+    else:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                yield path
+
+
+def filter_ext(paths, exts):
+    if exts is None:
+        yield from paths
+        return
+    for p in paths:
+        if os.path.splitext(p)[1].lower() in exts:
+            yield p
+
+
+def search_filenames(paths, pattern):
+    for p in paths:
+        if pattern.search(os.path.basename(p)):
+            yield p
+
+
+def surface_context(text, match, words):
+    before = text[:match.start()].split()[-words:]
+    after = text[match.end():].split()[:words]
+    return ' '.join(before + [match.group()] + after)
+
+
+def term_regex(term):
+    return re.sub(r'\\Z$', '', fnmatch.translate(term))
+
+
+def search_content(paths, pattern, terms, surface_words):
+    for p in paths:
+        try:
+            with open(p, 'r', errors='ignore') as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        if surface_words is not None:
+            yield p, surface_context(text, matches[0], surface_words)
+        else:
+            found = [t for t in terms
+                     if re.search(term_regex(t), text, re.IGNORECASE)]
+            yield p, ' | '.join(found)
+
+
+def print_flat(results):
+    for path, extra in results:
+        print(path)
+        if extra:
+            print(extra)
+        print()
+
+
+def print_tree(results):
+    tree = {}
+    for path, _ in results:
+        node = tree
+        for part in os.path.normpath(path).split(os.sep):
+            node = node.setdefault(part, {})
+
+    def walk(node, prefix=''):
+        entries = sorted(node.keys())
+        for i, name in enumerate(entries):
+            last = i == len(entries) - 1
+            print(prefix + ('└── ' if last else '├── ') + name)
+            walk(node[name], prefix + ('    ' if last else '│   '))
+
+    walk(tree)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='kbs', description='Search filenames or file contents.')
+    ap.add_argument('search_term')
+    ap.add_argument('-c', '--content', action='store_true')
+    ap.add_argument('-r', '--root', action='store_true')
+    ap.add_argument('-p', '--type', choices=sorted(TYPES.keys()), default=None)
+    ap.add_argument('-t', '--tree', action='store_true')
+    ap.add_argument('-s', '--surface', nargs='?', type=int, const=8, default=None)
+    args = ap.parse_args()
+
+    if args.surface is not None and not args.content:
+        sys.exit('kbs: -s/--surface requires -c/--content')
+
+    terms, pattern = build_pattern(args.search_term)
+    paths = iter_files('.', recursive=not args.root)
+
+    exts = TYPES.get(args.type)
+    paths = filter_ext(paths, exts)
+
+    if args.content:
+        results = list(search_content(paths, pattern, terms, args.surface))
+    else:
+        results = [(p, None) for p in search_filenames(paths, pattern)]
+
+    if not results:
+        return
+
+    if args.tree:
+        print_tree(results)
+    else:
+        print_flat(results)
+
+
+if __name__ == '__main__':
+    main()
