@@ -34,6 +34,23 @@ import os
 import re
 import sys
 
+# ANSI colors for output. Auto-disabled when not writing to a terminal
+# (e.g. piped into another command or redirected to a file).
+COLOR = sys.stdout.isatty()
+GREY = '\033[90m'
+GREEN = '\033[32m'
+RESET = '\033[0m'
+
+
+def colorize_path(path):
+    """Return path with its directory part in grey and filename in green."""
+    if not COLOR:
+        return path
+    head, tail = os.path.split(path)
+    if head:
+        return f'{GREY}{head}{os.sep}{RESET}{GREEN}{tail}{RESET}'
+    return f'{GREEN}{tail}{RESET}'
+
 # File-type groups for the -p/--type flag.
 # To add a new type: add a "name: {extensions}" entry below.
 # The name becomes the value you pass, e.g. TYPES['pdf'] -> `kbs term -p pdf`.
@@ -118,7 +135,7 @@ def search_content(paths, pattern, terms, surface_words):
 
 def print_flat(results):
     for path, extra in results:
-        print(path)
+        print(colorize_path(path))
         if extra:
             print(extra)
         print()
@@ -135,7 +152,10 @@ def print_tree(results):
         entries = sorted(node.keys())
         for i, name in enumerate(entries):
             last = i == len(entries) - 1
-            print(prefix + ('└── ' if last else '├── ') + name)
+            is_file = not node[name]  # leaf node = the matched file
+            colored = f'{GREEN}{name}{RESET}' if (is_file and COLOR) \
+                else f'{GREY}{name}{RESET}' if COLOR else name
+            print(prefix + ('└── ' if last else '├── ') + colored)
             walk(node[name], prefix + ('    ' if last else '│   '))
 
     walk(tree)
