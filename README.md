@@ -1,0 +1,2 @@
+# kbs
+Simplified search script
