@@ -7,9 +7,19 @@ output, and surfacing surrounding context around a content match.
 
 ## Install
 
+One-line install:
+
+```
+curl -fsSL https://raw.githubusercontent.com/kbenestad/kbs/refs/heads/main/kbs -o ~/.local/bin/kbs
+chmod +x ~/.local/bin/kbs
+
+```
+
+Or a safer version:
+
 ```sh
 mkdir -p ~/.local/bin
-curl -fsSL {CANONICALPATHHERE} -o ~/.local/bin/kbs
+curl -fsSL https://raw.githubusercontent.com/kbenestad/kbs/refs/heads/main/kbs -o ~/.local/bin/kbs
 chmod +x ~/.local/bin/kbs
 ```
 
