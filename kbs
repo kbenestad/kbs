@@ -37,7 +37,7 @@ import sys
 # ANSI colors for output. Auto-disabled when not writing to a terminal
 # (e.g. piped into another command or redirected to a file).
 COLOR = sys.stdout.isatty()
-GREY = '\033[90m'
+GREY = '\033[38;5;250m'
 GREEN = '\033[32m'
 RESET = '\033[0m'
 
