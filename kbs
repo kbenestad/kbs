@@ -24,6 +24,10 @@ Usage:
   kbs SEARCHTERM -p TYPE       restrict to a file type (see TYPES below)
   kbs SEARCHTERM -t            show results as a tree instead of a flat list
   kbs SEARCHTERM -c -s [N]     show N words of context around each match (default 8)
+  kbs SEARCHTERM -c -sa        like -s but shows every match, not just the first
+  kbs SEARCHTERM -i            interactive: pick a result, cd into its folder
+                                (requires the kbs() shell function, see README)
+  kbs SEARCHTERM -rp NEWTERM   find/replace in file contents, asks to confirm
 
 Flags combine, e.g.: kbs "invoice*" -c -p office -s 10
 """
@@ -38,18 +42,18 @@ import sys
 # (e.g. piped into another command or redirected to a file).
 COLOR = sys.stdout.isatty()
 GREY = '\033[38;5;250m'
-GREEN = '\033[32m'
+YELLOW = '\033[33m'
 RESET = '\033[0m'
 
 
 def colorize_path(path):
-    """Return path with its directory part in grey and filename in green."""
+    """Return path with its directory part in grey and filename in yellow."""
     if not COLOR:
         return path
     head, tail = os.path.split(path)
     if head:
-        return f'{GREY}{head}{os.sep}{RESET}{GREEN}{tail}{RESET}'
-    return f'{GREEN}{tail}{RESET}'
+        return f'{GREY}{head}{os.sep}{RESET}{YELLOW}{tail}{RESET}'
+    return f'{YELLOW}{tail}{RESET}'
 
 # File-type groups for the -p/--type flag.
 # To add a new type: add a "name: {extensions}" entry below.
@@ -108,14 +112,17 @@ def search_filenames(paths, pattern):
 def surface_context(text, match, words):
     before = text[:match.start()].split()[-words:]
     after = text[match.end():].split()[:words]
-    return ' '.join(before + [match.group()] + after)
+    term = match.group()
+    if COLOR:
+        term = f'{YELLOW}{term}{RESET}'
+    return ' '.join(before + [term] + after)
 
 
 def term_regex(term):
     return re.sub(r'\\Z$', '', fnmatch.translate(term))
 
 
-def search_content(paths, pattern, terms, surface_words):
+def search_content(paths, pattern, terms, surface_words, surface_all):
     for p in paths:
         try:
             with open(p, 'r', errors='ignore') as f:
@@ -126,11 +133,83 @@ def search_content(paths, pattern, terms, surface_words):
         if not matches:
             continue
         if surface_words is not None:
-            yield p, surface_context(text, matches[0], surface_words)
+            chosen = matches if surface_all else matches[:1]
+            snippets = [surface_context(text, m, surface_words) for m in chosen]
+            yield p, '\n'.join(snippets)
         else:
             found = [t for t in terms
                      if re.search(term_regex(t), text, re.IGNORECASE)]
             yield p, ' | '.join(found)
+
+
+def interactive_menu(results, search_term):
+    groups = {}
+    order = []
+    for path, _ in results:
+        d = os.path.dirname(path) or '.'
+        if d not in groups:
+            groups[d] = []
+            order.append(d)
+        groups[d].append(os.path.basename(path))
+
+    print('kbs -- results:')
+    print(f'Searchterm {search_term} was found in the following files:')
+    for i, d in enumerate(order, start=1):
+        names = groups[d]
+        print(f'{i}. {colorize_path(os.path.join(d, names[0]))}')
+        pad = ' ' * len(f'{i}. ')
+        for name in names[1:]:
+            print(pad + colorize_path(os.path.join(d, name)))
+
+    choice = input('\nOpen folder? Enter number: ').strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(order)):
+        print('kbs: invalid selection, nothing to do')
+        return
+
+    target_dir = os.path.abspath(order[int(choice) - 1])
+    cd_file = os.environ.get('KBS_CD_TARGET_FILE')
+    if cd_file:
+        with open(cd_file, 'w') as f:
+            f.write(target_dir)
+    else:
+        print(f'\nkbs cannot change your shell\'s directory on its own — see the')
+        print('kbs() shell function in the README to enable auto-cd.')
+        print(f'Target folder: {target_dir}')
+
+
+def replace_mode(search_term, new_text, recursive, exts):
+    terms, pattern = build_pattern(search_term)
+    paths = filter_ext(iter_files('.', recursive=recursive), exts)
+
+    changes = []
+    for p in paths:
+        try:
+            with open(p, 'r', errors='ignore') as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        new_content, count = pattern.subn(new_text, text)
+        if count:
+            changes.append((p, count, new_content))
+
+    if not changes:
+        print('kbs: no matches found, nothing to replace')
+        return
+
+    print(f'kbs -- replace preview: "{search_term}" -> "{new_text}"')
+    for path, count, _ in changes:
+        occ = 'occurrence' if count == 1 else 'occurrences'
+        print(f'  {colorize_path(path)}  ({count} {occ})')
+
+    answer = input(f'\nReplace in {len(changes)} file(s)? [y/N]: ').strip().lower()
+    if answer != 'y':
+        print('kbs: cancelled, no files changed')
+        return
+
+    for path, _, new_content in changes:
+        with open(path, 'w') as f:
+            f.write(new_content)
+    print(f'kbs: replaced in {len(changes)} file(s)')
 
 
 def print_flat(results):
@@ -153,7 +232,7 @@ def print_tree(results):
         for i, name in enumerate(entries):
             last = i == len(entries) - 1
             is_file = not node[name]  # leaf node = the matched file
-            colored = f'{GREEN}{name}{RESET}' if (is_file and COLOR) \
+            colored = f'{YELLOW}{name}{RESET}' if (is_file and COLOR) \
                 else f'{GREY}{name}{RESET}' if COLOR else name
             print(prefix + ('└── ' if last else '├── ') + colored)
             walk(node[name], prefix + ('    ' if last else '│   '))
@@ -162,17 +241,60 @@ def print_tree(results):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog='kbs', description='Search filenames or file contents.')
-    ap.add_argument('search_term')
-    ap.add_argument('-c', '--content', action='store_true')
-    ap.add_argument('-r', '--root', action='store_true')
-    ap.add_argument('-p', '--type', choices=sorted(TYPES.keys()), default=None)
-    ap.add_argument('-t', '--tree', action='store_true')
-    ap.add_argument('-s', '--surface', nargs='?', type=int, const=8, default=None)
+    ap = argparse.ArgumentParser(
+        prog='kbs',
+        description='Search filenames or file contents.',
+        epilog=(
+            'Examples:\n'
+            '  kbs report                     filenames containing "report"\n'
+            '  kbs "invoice | receipt"        OR terms (quote it)\n'
+            '  kbs "draft*"                   wildcard (quote it)\n'
+            '  kbs budget -c                  search file contents\n'
+            '  kbs budget -c -s               show context around first match\n'
+            '  kbs budget -c -sa              show context around every match\n'
+            '  kbs report -p office           filter to office/doc file types\n'
+            '  kbs report -t                  tree view\n'
+            '  kbs report -c -i               interactive: pick a result, cd there\n'
+            '  kbs "old" -rp "new"            find/replace in file contents\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument('search_term',
+                     help='text to search for; use "a | b" for OR, "*" for wildcard (quote both)')
+    ap.add_argument('-c', '--content', action='store_true',
+                     help='search file contents instead of filenames')
+    ap.add_argument('-r', '--root', action='store_true',
+                     help="current folder only, don't recurse into subfolders")
+    ap.add_argument('-p', '--type', choices=sorted(TYPES.keys()), default=None,
+                     help='restrict to a file type: ' + ', '.join(sorted(TYPES.keys())))
+    ap.add_argument('-t', '--tree', action='store_true',
+                     help='print results as a tree instead of a flat list')
+    ap.add_argument('-s', '--surface', nargs='?', type=int, const=8, default=None,
+                     help='show N words of context around the first content match '
+                          '(default 8 if N omitted); requires -c')
+    ap.add_argument('-sa', '--surface-all', action='store_true',
+                     help='like -s, but shows every match instead of just the first; requires -c')
+    ap.add_argument('-i', '--interactive', action='store_true',
+                     help='list results grouped by folder, numbered; pick one to cd there '
+                          '(needs the kbs() shell function, see README)')
+    ap.add_argument('-rp', '--replace', metavar='NEWTERM', default=None,
+                     help='find/replace in file contents, with a confirmation prompt before writing')
     args = ap.parse_args()
 
+    if args.replace is not None:
+        if args.content or args.surface is not None or args.surface_all \
+                or args.tree or args.interactive:
+            sys.exit('kbs: -rp/--replace cannot be combined with -c/-s/-sa/-t/-i')
+        exts = TYPES.get(args.type)
+        replace_mode(args.search_term, args.replace, not args.root, exts)
+        return
+
+    if args.surface_all and not args.content:
+        sys.exit('kbs: -sa/--surface-all requires -c/--content')
     if args.surface is not None and not args.content:
         sys.exit('kbs: -s/--surface requires -c/--content')
+    if args.interactive and args.tree:
+        sys.exit('kbs: choose only one of -i/--interactive or -t/--tree')
 
     terms, pattern = build_pattern(args.search_term)
     paths = iter_files('.', recursive=not args.root)
@@ -181,14 +303,16 @@ def main():
     paths = filter_ext(paths, exts)
 
     if args.content:
-        results = list(search_content(paths, pattern, terms, args.surface))
+        results = list(search_content(paths, pattern, terms, args.surface, args.surface_all))
     else:
         results = [(p, None) for p in search_filenames(paths, pattern)]
 
     if not results:
         return
 
-    if args.tree:
+    if args.interactive:
+        interactive_menu(results, args.search_term)
+    elif args.tree:
         print_tree(results)
     else:
         print_flat(results)
